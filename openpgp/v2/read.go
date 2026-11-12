@@ -355,6 +355,18 @@ func (sc *SignatureCandidate) validate() bool {
 		sc.IssuerKeyId == *correspondingSig.IssuerKeyId
 }
 
+// decompressionBudget returns a per-message copy of the configured
+// decompressed message size limit, or nil if no limit is configured. All
+// nested compressed packets of a single message must draw from the same
+// budget so that nesting cannot multiply the permitted decompressed output.
+func decompressionBudget(config *packet.Config) *int64 {
+	if limit := config.DecompressedMessageSizeLimit(); limit != nil {
+		budget := *limit
+		return &budget
+	}
+	return nil
+}
+
 // readSignedMessage reads a possibly signed message if mdin is non-zero then
 // that structure is updated and returned. Otherwise a fresh MessageDetails is
 // used.
@@ -366,6 +378,7 @@ func readSignedMessage(packets packet.PacketReader, mdin *MessageDetails, keyrin
 
 	var p packet.Packet
 	var prevLast bool
+	decompressedBudget := decompressionBudget(config)
 FindLiteralData:
 	for {
 		p, err = packets.Next()
@@ -374,7 +387,7 @@ FindLiteralData:
 		}
 		switch p := p.(type) {
 		case *packet.Compressed:
-			if err := packets.Push(p.LimitedBodyReader(config.DecompressedMessageSizeLimit())); err != nil {
+			if err := packets.Push(p.SharedLimitedBodyReader(decompressedBudget)); err != nil {
 				return nil, err
 			}
 		case *packet.OnePassSignature:

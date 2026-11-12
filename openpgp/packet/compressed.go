@@ -108,6 +108,41 @@ func (c *Compressed) LimitedBodyReader(limit *int64) io.Reader {
 	return &LimitReader{R: c.Body, N: *limit}
 }
 
+// SharedLimitedBodyReader wraps the body reader with a limiter that draws from
+// a budget shared with other readers. Nested compressed packets in a single
+// message must share one budget: handing each layer its own copy of the limit
+// would multiply the total decompressed output by the nesting depth.
+// If budget is nil, the reader is unbounded. The budget is mutated by reads
+// and must not be shared across messages.
+func (c *Compressed) SharedLimitedBodyReader(budget *int64) io.Reader {
+	if budget == nil {
+		return c.Body
+	}
+	return &sharedLimitReader{R: c.Body, Budget: budget}
+}
+
+// sharedLimitReader is an io.Reader that fails with ErrMessageTooLarge once
+// the shared byte budget is exhausted.
+type sharedLimitReader struct {
+	R      io.Reader // underlying reader
+	Budget *int64    // max bytes allowed, shared with other readers
+}
+
+func (l *sharedLimitReader) Read(p []byte) (int, error) {
+	if *l.Budget <= 0 {
+		return 0, errors.ErrMessageTooLarge
+	}
+
+	n, err := l.R.Read(p)
+	*l.Budget -= int64(n)
+
+	if err == nil && *l.Budget <= 0 {
+		err = errors.ErrMessageTooLarge
+	}
+
+	return n, err
+}
+
 // compressedWriterCloser represents the serialized compression stream
 // header and the compressor. Its Close() method ensures that both the
 // compressor and serialized stream header are closed. Its Write()

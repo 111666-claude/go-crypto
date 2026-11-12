@@ -87,6 +87,12 @@ func (r *partialLengthReader) Read(p []byte) (n int, err error) {
 		}
 		r.remaining, r.isPartial, err = readLength(r.r)
 		if err != nil {
+			if err == io.EOF {
+				// The stream ended while a continuation length was
+				// expected: the packet is truncated and must not be
+				// mistaken for a cleanly terminated one.
+				err = io.ErrUnexpectedEOF
+			}
 			return 0, err
 		}
 	}
@@ -98,8 +104,15 @@ func (r *partialLengthReader) Read(p []byte) (n int, err error) {
 
 	n, err = r.r.Read(p[:int(toRead)])
 	r.remaining -= int64(n)
-	if n < int(toRead) && err == io.EOF {
-		err = io.ErrUnexpectedEOF
+	if err == io.EOF {
+		if n < int(toRead) {
+			err = io.ErrUnexpectedEOF
+		} else {
+			// A reader may return io.EOF together with the final bytes.
+			// Report the data first and surface the end of the chunk (or
+			// stream) on the next call instead.
+			err = nil
+		}
 	}
 	return
 }
@@ -307,6 +320,28 @@ func consumeAll(r io.Reader) (n int64, err error) {
 			return
 		}
 	}
+}
+
+// maxBufferedPacketSize bounds the number of content bytes of a single packet
+// that may be buffered in memory while parsing. Packets whose contents are
+// streamed (e.g. LiteralData) are not subject to this limit, but packet types
+// that are parsed into memory in one piece (e.g. UserId, UserAttribute and
+// OpaquePacket) are. Without a bound, a small (possibly decompressed) input
+// can declare a huge packet length and exhaust memory.
+const maxBufferedPacketSize = 1 << 26 // 64 MiB
+
+// readAllBounded reads the whole contents of r into memory, like io.ReadAll,
+// but fails with errors.ErrMessageTooLarge if r yields more than
+// maxBufferedPacketSize bytes.
+func readAllBounded(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxBufferedPacketSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxBufferedPacketSize {
+		return nil, errors.ErrMessageTooLarge
+	}
+	return b, nil
 }
 
 // packetType represents the numeric ids of the different OpenPGP packet types. See

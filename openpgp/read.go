@@ -155,6 +155,12 @@ ParsePackets:
 			}
 			packets.Unread(p)
 			return readSignedMessage(packets, nil, keyring, config)
+		case *packet.Signature:
+			// A Signature packet that is not announced by a preceding
+			// OnePassSignature packet cannot be verified by this
+			// streaming API. Fail closed instead of silently dropping it
+			// and treating the message as unsigned.
+			return nil, errors.StructuralError("signature packet found before literal data")
 		}
 	}
 
@@ -243,6 +249,18 @@ FindKey:
 	return mdFinal, nil
 }
 
+// decompressionBudget returns a per-message copy of the configured
+// decompressed message size limit, or nil if no limit is configured. All
+// nested compressed packets of a single message must draw from the same
+// budget so that nesting cannot multiply the permitted decompressed output.
+func decompressionBudget(config *packet.Config) *int64 {
+	if limit := config.DecompressedMessageSizeLimit(); limit != nil {
+		budget := *limit
+		return &budget
+	}
+	return nil
+}
+
 // readSignedMessage reads a possibly signed message if mdin is non-zero then
 // that structure is updated and returned. Otherwise a fresh MessageDetails is
 // used.
@@ -256,6 +274,7 @@ func readSignedMessage(packets *packet.Reader, mdin *MessageDetails, keyring Key
 	var h hash.Hash
 	var wrappedHash hash.Hash
 	var prevLast bool
+	decompressedBudget := decompressionBudget(config)
 FindLiteralData:
 	for {
 		p, err = packets.Next()
@@ -264,7 +283,7 @@ FindLiteralData:
 		}
 		switch p := p.(type) {
 		case *packet.Compressed:
-			if err := packets.Push(p.LimitedBodyReader(config.DecompressedMessageSizeLimit())); err != nil {
+			if err := packets.Push(p.SharedLimitedBodyReader(decompressedBudget)); err != nil {
 				return nil, err
 			}
 		case *packet.OnePassSignature:
@@ -296,6 +315,12 @@ FindLiteralData:
 		case *packet.LiteralData:
 			md.LiteralData = p
 			break FindLiteralData
+		case *packet.Signature:
+			// A Signature packet that is not announced by a preceding
+			// OnePassSignature packet cannot be verified by this streaming
+			// API. Fail closed instead of silently dropping it and
+			// treating the message as unsigned.
+			return nil, errors.StructuralError("signature packet found before literal data")
 		}
 	}
 
@@ -423,6 +448,12 @@ func (scr *signatureCheckReader) Read(buf []byte) (int, error) {
 				} else {
 					scr.md.UnverifiedSignatures = append(scr.md.UnverifiedSignatures, sig)
 				}
+			} else if _, isPadding := p.(packet.Padding); !isPadding {
+				// Only Signature (and ignorable Padding) packets may
+				// follow the LiteralData of a signed message. Anything
+				// else indicates a malformed or manipulated packet
+				// sequence and must not be silently skipped.
+				return n, errors.StructuralError("unexpected packet after literal data")
 			}
 
 			p, readError = scr.packets.Next()

@@ -62,7 +62,7 @@ func NewUserAttribute(contents ...*OpaqueSubpacket) *UserAttribute {
 
 func (uat *UserAttribute) parse(r io.Reader) (err error) {
 	// RFC 4880, section 5.13
-	b, err := io.ReadAll(r)
+	b, err := readAllBounded(r)
 	if err != nil {
 		return
 	}
